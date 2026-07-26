@@ -21,6 +21,7 @@ import type {
   ProviderOptionDescriptor,
   ServerProviderModel,
   ServerProviderSkill,
+  ServerProviderUsageLimit,
 } from "@t3tools/contracts";
 import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/contracts";
 
@@ -48,6 +49,71 @@ export interface CodexAppServerProviderSnapshot {
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
+  readonly usageLimits?: ReadonlyArray<ServerProviderUsageLimit>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeCodexRateLimitWindow(value: unknown): ServerProviderUsageLimit | undefined {
+  if (!isRecord(value)) return undefined;
+  const usedPercent = value.usedPercent;
+  const windowDurationMinutes = value.windowDurationMins;
+  if (
+    typeof usedPercent !== "number" ||
+    !Number.isFinite(usedPercent) ||
+    usedPercent < 0 ||
+    usedPercent > 100 ||
+    typeof windowDurationMinutes !== "number" ||
+    !Number.isInteger(windowDurationMinutes) ||
+    windowDurationMinutes <= 0
+  ) {
+    return undefined;
+  }
+
+  const resetsAtSeconds = value.resetsAt;
+  const resetsAt =
+    typeof resetsAtSeconds === "number" && Number.isInteger(resetsAtSeconds) && resetsAtSeconds >= 0
+      ? Option.getOrUndefined(
+          Option.map(DateTime.make(resetsAtSeconds * 1_000), DateTime.formatIso),
+        )
+      : undefined;
+
+  return {
+    usedPercent,
+    windowDurationMinutes,
+    ...(resetsAt ? { resetsAt } : {}),
+  };
+}
+
+export function normalizeCodexUsageLimits(
+  response: unknown,
+): ReadonlyArray<ServerProviderUsageLimit> {
+  if (!isRecord(response)) return [];
+  const byLimitId = response.rateLimitsByLimitId;
+  const codexBucket =
+    isRecord(byLimitId) && isRecord(byLimitId.codex) ? byLimitId.codex : undefined;
+  const bucket = codexBucket ?? (isRecord(response.rateLimits) ? response.rateLimits : undefined);
+  if (!bucket) return [];
+
+  return [bucket.primary, bucket.secondary]
+    .map(normalizeCodexRateLimitWindow)
+    .filter((window): window is ServerProviderUsageLimit => window !== undefined);
+}
+
+export const requestCodexUsageLimits = (
+  client: CodexClient.CodexAppServerClient["Service"],
+): Effect.Effect<ReadonlyArray<ServerProviderUsageLimit>> =>
+  client.request("account/rateLimits/read", undefined).pipe(
+    Effect.map(normalizeCodexUsageLimits),
+    Effect.orElseSucceed(() => []),
+  );
+
+export function codexAccountSupportsUsageLimits(
+  account: CodexSchema.V2GetAccountResponse["account"],
+): boolean {
+  return account?.type === "chatgpt";
 }
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
@@ -386,15 +452,19 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       version,
       models: appendCustomCodexModels([], input.customModels ?? []),
       skills: [],
+      usageLimits: [],
     } satisfies CodexAppServerProviderSnapshot;
   }
 
-  const [skillsResponse, models] = yield* Effect.all(
+  const [skillsResponse, models, usageLimits] = yield* Effect.all(
     [
       client.request("skills/list", {
         cwds: [input.cwd],
       }),
       requestAllCodexModels(client),
+      codexAccountSupportsUsageLimits(accountResponse.account)
+        ? requestCodexUsageLimits(client)
+        : Effect.succeed([]),
     ],
     { concurrency: "unbounded" },
   );
@@ -406,6 +476,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       appendCustomCodexModels(models, input.customModels ?? []),
     ),
     skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
+    usageLimits,
   } satisfies CodexAppServerProviderSnapshot;
 });
 
@@ -595,6 +666,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     checkedAt,
     models: snapshot.models,
     skills: snapshot.skills,
+    usageLimits: snapshot.usageLimits ?? [],
     probe: {
       installed: true,
       version: snapshot.version ?? null,

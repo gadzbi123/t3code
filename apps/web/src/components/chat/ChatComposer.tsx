@@ -88,6 +88,9 @@ import {
   renderProviderTraitsPicker,
 } from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { getCodexWeeklyLimitProvider } from "../../lib/providerUsageLimits";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
 import { cn, randomUUID } from "~/lib/utils";
@@ -403,6 +406,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadProviderDisplayName: string | null;
+  activeThreadProvider: ServerProvider | null;
+  onRefreshWeeklyLimit: () => Promise<boolean>;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -423,12 +428,15 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
 }) {
+  const weeklyLimitProvider = getCodexWeeklyLimitProvider(props.activeThreadProvider);
   return (
     <>
       {props.activeContextWindow ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
           providerDisplayName={props.activeThreadProviderDisplayName}
+          {...(weeklyLimitProvider ? { weeklyLimitProvider } : {})}
+          onRefreshWeeklyLimit={props.onRefreshWeeklyLimit}
         />
       ) : null}
       {props.isPreparingWorktree ? (
@@ -685,6 +693,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setThreadError,
     onExpandImage,
   } = props;
+  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
 
   // ------------------------------------------------------------------
   // Store subscriptions (prompt / images / terminal contexts)
@@ -931,16 +942,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => deriveLatestContextWindowSnapshot(activeThreadActivities ?? []),
     [activeThreadActivities],
   );
-  const activeThreadProviderDisplayName = useMemo(() => {
+  const activeThreadProvider = useMemo(() => {
     if (!activeThreadModelSelection) return null;
-    const entry = providerStatuses.find(
-      (p) => p.instanceId === activeThreadModelSelection.instanceId,
+    return (
+      providerStatuses.find((p) => p.instanceId === activeThreadModelSelection.instanceId) ?? null
     );
-    if (entry) {
-      return getProviderDisplayName(providerStatuses, entry.driver);
-    }
-    return formatProviderDisplayName(activeThreadModelSelection.instanceId);
   }, [providerStatuses, activeThreadModelSelection]);
+  const activeThreadProviderDisplayName = useMemo(() => {
+    if (activeThreadProvider) {
+      return getProviderDisplayName(providerStatuses, activeThreadProvider.driver);
+    }
+    if (!activeThreadModelSelection) return null;
+    return formatProviderDisplayName(activeThreadModelSelection.instanceId);
+  }, [providerStatuses, activeThreadModelSelection, activeThreadProvider]);
+  const refreshActiveThreadProviderUsage = useCallback(async (): Promise<boolean> => {
+    if (!activeThreadProvider || activeThreadProvider.driver !== "codex") return false;
+    const result = await refreshProviders({
+      environmentId,
+      input: { instanceId: activeThreadProvider.instanceId },
+    });
+    return result._tag === "Success";
+  }, [activeThreadProvider, environmentId, refreshProviders]);
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -2719,6 +2741,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   activeThreadProviderDisplayName={activeThreadProviderDisplayName}
+                  activeThreadProvider={activeThreadProvider}
+                  onRefreshWeeklyLimit={refreshActiveThreadProviderUsage}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

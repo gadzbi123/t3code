@@ -154,6 +154,13 @@ export const ServerProviderUpdateState = Schema.Struct({
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
+export const ServerProviderUsageLimit = Schema.Struct({
+  usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  windowDurationMinutes: PositiveInt,
+  resetsAt: Schema.optional(IsoDateTime),
+});
+export type ServerProviderUsageLimit = typeof ServerProviderUsageLimit.Type;
+
 export const ServerProvider = Schema.Struct({
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
@@ -188,6 +195,9 @@ export const ServerProvider = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  // Optional for backward compatibility and provider-neutral so additional
+  // drivers can publish normalized rolling windows without changing the wire.
+  usageLimits: Schema.optional(Schema.Array(ServerProviderUsageLimit)),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });

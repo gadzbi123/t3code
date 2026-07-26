@@ -1,6 +1,92 @@
 import { assert, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as CodexClient from "effect-codex-app-server/client";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import {
+  applyPreferredCodexDefaultModel,
+  codexAccountSupportsUsageLimits,
+  mapCodexModelCapabilities,
+  normalizeCodexUsageLimits,
+  requestCodexUsageLimits,
+} from "./CodexProvider.ts";
+
+it("normalizes a weekly window from either position", () => {
+  assert.deepStrictEqual(
+    normalizeCodexUsageLimits({
+      rateLimits: {
+        primary: { usedPercent: 8, windowDurationMins: 300 },
+        secondary: { usedPercent: 21, windowDurationMins: 10_080, resetsAt: 1_800_000_000 },
+      },
+    }),
+    [
+      { usedPercent: 8, windowDurationMinutes: 300 },
+      {
+        usedPercent: 21,
+        windowDurationMinutes: 10_080,
+        resetsAt: "2027-01-15T08:00:00.000Z",
+      },
+    ],
+  );
+
+  assert.deepStrictEqual(
+    normalizeCodexUsageLimits({
+      rateLimits: {
+        primary: { usedPercent: 21, windowDurationMins: 10_080 },
+      },
+    }),
+    [{ usedPercent: 21, windowDurationMinutes: 10_080 }],
+  );
+});
+
+it("prefers the codex bucket in a multi-bucket response", () => {
+  assert.deepStrictEqual(
+    normalizeCodexUsageLimits({
+      rateLimits: { primary: { usedPercent: 90, windowDurationMins: 10_080 } },
+      rateLimitsByLimitId: {
+        other: { primary: { usedPercent: 70, windowDurationMins: 10_080 } },
+        codex: { secondary: { usedPercent: 21, windowDurationMins: 10_080 } },
+      },
+    }),
+    [{ usedPercent: 21, windowDurationMinutes: 10_080 }],
+  );
+});
+
+it("omits malformed rate-limit windows without failing the provider", () => {
+  assert.deepStrictEqual(normalizeCodexUsageLimits(null), []);
+  assert.deepStrictEqual(
+    normalizeCodexUsageLimits({
+      rateLimits: {
+        primary: { usedPercent: 101, windowDurationMins: 10_080 },
+        secondary: { usedPercent: 21, windowDurationMins: 0 },
+      },
+    }),
+    [],
+  );
+});
+
+it("only requests subscription usage for ChatGPT accounts", () => {
+  assert.strictEqual(codexAccountSupportsUsageLimits(undefined), false);
+  assert.strictEqual(codexAccountSupportsUsageLimits(null), false);
+  assert.strictEqual(codexAccountSupportsUsageLimits({ type: "apiKey" }), false);
+  assert.strictEqual(
+    codexAccountSupportsUsageLimits({
+      type: "chatgpt",
+      email: "person@example.com",
+      planType: "plus",
+    }),
+    true,
+  );
+});
+
+it.effect("degrades rate-limit request failures to an empty window list", () =>
+  Effect.gen(function* () {
+    const client = {
+      request: () => Effect.fail({ _tag: "Unsupported" as const }),
+    } as unknown as CodexClient.CodexAppServerClient["Service"];
+    const limits = yield* requestCodexUsageLimits(client);
+    assert.deepStrictEqual(limits, []);
+  }),
+);
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
